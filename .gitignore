@@ -1,0 +1,6 @@
+bin/
+obj/
+decompiled/
+*.user
+.vs/
+.claude/settings.local.json
