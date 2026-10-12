@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Reflection;
 using BepInEx;
@@ -161,21 +162,33 @@ public class AltPeekPlugin : BaseUnityPlugin
 
     private void ShowPeek(object target)
     {
+        // Remember the target even if showing it fails, so a broken one isn't retried every frame.
+        _shown = target;
         _layer.gameObject.SetActive(true);
         _layer.SetAsLastSibling();
-        if (target is Element aspect)
+        try
         {
-            _peek.HideAll();
-            _peek.PreviewAspect(aspect);
+            if (target is Element aspect)
+            {
+                _peek.HideAll();
+                _peek.PreviewAspect(aspect);
+            }
+            else
+            {
+                _peek.ShowDetailable((IDetailable)target);
+            }
         }
-        else
+        catch (Exception e)
         {
-            _peek.ShowDetailable((IDetailable)target);
+            // Some detailables carry aspects missing from the compendium (e.g. NULL_ELEMENT_ID)
+            // and the game's own window code throws on them.
+            Logger.LogDebug($"Can't peek {target}: {e.Message}");
+            _layer.gameObject.SetActive(false);
+            return;
         }
         // Renaming books is an input field; meaningless in a window you can't click.
         (EditableIlluminationField.GetValue(_peek) as GameObject)?.SetActive(false);
         LayoutRebuilder.ForceRebuildLayoutImmediate(_peekRect);
-        _shown = target;
     }
 
     private void HidePeek()
