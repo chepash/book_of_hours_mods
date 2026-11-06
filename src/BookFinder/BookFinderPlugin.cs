@@ -11,7 +11,7 @@ using UnityEngine.InputSystem;
 namespace BookFinder;
 
 /// <summary>
-/// Ctrl+F opens a window that lists every book in explored rooms, filtered by mystery,
+/// F (or Ctrl+F) opens a window that lists every book in explored rooms, filtered by mystery,
 /// difficulty, read state, language and title, plus tabs for items and people (visitors, assistants) already met.
 /// Clicking a result flies the camera to it.
 /// </summary>
@@ -25,13 +25,22 @@ public class BookFinderPlugin : BaseUnityPlugin
     private static readonly FieldInfo MasterDetailWindowField = AccessTools.Field(typeof(AureateNotifier), "masterDetailWindow");
 
     internal static BookFinderWindow Window;
+    /// <summary>Items tab: a double click may also send the card into a free slot of the carried things.</summary>
+    internal static BepInEx.Configuration.ConfigEntry<bool> ItemsToHand;
+    /// <summary>Books tab: the same for books.</summary>
+    internal static BepInEx.Configuration.ConfigEntry<bool> BooksToHand;
     private Harmony _harmony;
     private float _nextVisitorScan;
 
     private void Awake()
     {
+        ItemsToHand = Config.Bind("Items", "DoubleClickToHand", false,
+            "Items tab: when no open window takes a double-clicked card, put it into a free slot of your carried things.");
+        BooksToHand = Config.Bind("Books", "DoubleClickToHand", false,
+            "Books tab: when no open window takes a double-clicked book, put it into a free slot of your carried things.");
         _harmony = new Harmony(Guid);
         _harmony.PatchAll(typeof(BlockZoomOverWindow));
+        _harmony.PatchAll(typeof(RecordCooking));
         Logger.LogInfo($"{Name} {Version} loaded");
     }
 
@@ -51,7 +60,10 @@ public class BookFinderPlugin : BaseUnityPlugin
         if (keyboard == null)
             return;
 
-        if (keyboard.ctrlKey.isPressed && keyboard.fKey.wasPressedThisFrame)
+        // F alone (free in the game's default bindings) or Ctrl+F; never while typing in a text field,
+        // so an 'f' typed into the Finder's own search (or any game field) stays a letter.
+        if (keyboard.fKey.wasPressedThisFrame && !keyboard.altKey.isPressed && !keyboard.shiftKey.isPressed
+            && (keyboard.ctrlKey.isPressed || !IsEditingText()))
         {
             Toggle();
             return;
@@ -59,6 +71,14 @@ public class BookFinderPlugin : BaseUnityPlugin
         // Esc only while typing: otherwise the game also handles it (and may open its menu).
         if (Window != null && Window.IsOpen && Window.IsSearchFocused && keyboard.escapeKey.wasPressedThisFrame)
             Window.Close();
+    }
+
+    /// <summary>The same test the game uses (UIController.IsEditingText): a text field has the focus.</summary>
+    private static bool IsEditingText()
+    {
+        GameObject selected = UnityEngine.EventSystems.EventSystem.current?.currentSelectedGameObject;
+        return selected != null && (selected.GetComponent<TMPro.TMP_InputField>() != null
+            || selected.GetComponent<UnityEngine.UI.InputField>() != null);
     }
 
     /// <summary>
@@ -113,6 +133,27 @@ public class BookFinderPlugin : BaseUnityPlugin
             return false;
         Window = BookFinderWindow.Create(canvas.rootCanvas.transform, Logger);
         return true;
+    }
+
+    /// <summary>
+    /// Kitchen recipes as they run, for the Cookbook tab (the game keeps no history). A prefix:
+    /// the alt recipe has already replaced the started one, and the situation may be gone after.
+    /// </summary>
+    [HarmonyPatch(typeof(Situation), nameof(Situation.ExecuteCurrentRecipe))]
+    private static class RecordCooking
+    {
+        private static void Prefix(Situation __instance)
+        {
+            try
+            {
+                CookBook.Record(__instance.GetCurrentRecipe()?.Id);
+                CookBook.RecordBrew(__instance);
+            }
+            catch (Exception)
+            {
+                // never break the game's recipe execution over a log of dishes
+            }
+        }
     }
 
     /// <summary>Scrolling the result list shouldn't also zoom the camera.</summary>

@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using BepInEx;
+using BohShared;
 using HarmonyLib;
 using SecretHistories.Assets.Scripts.Application.UI;
 using SecretHistories.Core;
@@ -23,6 +24,10 @@ namespace OrderPreview;
 /// Crafts name their result in Recipe.Effects. Orders don't: the product is found through the
 /// game's own chain: recipe mutation orderplaced.X → its "provisioning" xtrigger mutates
 /// contains.X → that aspect's "unwrapping" xtrigger spawns the product.
+/// A situation window shows the same icons for the recipe it's about to start or is running,
+/// at the left end of its footer (the Start button's bar, empty on the left): the game names it
+/// only in the note text. Only
+/// craftable recipes (what the player is making on purpose), never events or hint-only ones.
 /// </summary>
 [BepInPlugin(Guid, Name, Version)]
 public class OrderPreviewPlugin : BaseUnityPlugin
@@ -33,6 +38,7 @@ public class OrderPreviewPlugin : BaseUnityPlugin
 
     private static readonly FieldInfo RequirementsField = AccessTools.Field(typeof(AmbittableDisplayOpen), "requirementAspectsDisplay");
     private static readonly FieldInfo RecipeField = AccessTools.Field(typeof(AmbittableDisplayOpen), "_recipe");
+    private static readonly FieldInfo PayloadField = AccessTools.Field(typeof(AureateWindow), "_payload");
     private Harmony _harmony;
 
     private void Awake()
@@ -40,6 +46,7 @@ public class OrderPreviewPlugin : BaseUnityPlugin
         _harmony = new Harmony(Guid);
         _harmony.PatchAll(typeof(PopulatePatch));
         _harmony.PatchAll(typeof(ShowPatch));
+        _harmony.PatchAll(typeof(WindowPatch));
         StartCoroutine(FillExistingLists());
         Logger.LogInfo($"{Name} {Version} loaded");
     }
@@ -59,21 +66,15 @@ public class OrderPreviewPlugin : BaseUnityPlugin
             lists++;
             added += FillMissingIcons(display);
         }
-        // TEMP diagnostics
-        int entries = 0, withRecipe = 0, withIcon = 0, resolvable = 0;
-        var samples = new List<string>();
-        foreach (AmbittableDisplayOpen entry in Resources.FindObjectsOfTypeAll<AmbittableDisplayOpen>())
+        Logger.LogInfo($"Filled {added} result icons in {lists} existing recipe lists");
+
+        // Situation windows too: a recipe already running doesn't call DisplayButtonState again
+        // until its state changes.
+        foreach (AureateWindow window in Resources.FindObjectsOfTypeAll<AureateWindow>())
         {
-            if (!entry.gameObject.scene.IsValid()) continue;
-            entries++;
-            var recipe = RecipeField.GetValue(entry) as Recipe;
-            if (recipe != null) withRecipe++;
-            if (IconParent(entry).GetComponentInChildren<ProductIcon>(true) != null) withIcon++;
-            if (ResolveProducts(recipe).Count > 0) resolvable++;
-            if (samples.Count < 6) samples.Add($"{entry.name} recipe={recipe?.Id} effects={(recipe?.Effects == null ? "null" : string.Join(",", recipe.Effects))}");
+            if (window != null && window.gameObject.scene.IsValid() && PayloadField.GetValue(window) is Situation situation)
+                WindowPatch.Postfix(window, situation);
         }
-        Logger.LogInfo($"Filled {added} result icons in {lists} existing recipe lists; entries={entries} withRecipe={withRecipe} withIcon={withIcon} resolvable={resolvable}");
-        foreach (string sample in samples) Logger.LogInfo("  " + sample);
     }
 
     private static int FillMissingIcons(AmbittablesDisplay display)
@@ -84,9 +85,10 @@ public class OrderPreviewPlugin : BaseUnityPlugin
             Transform parent = IconParent(entry);
             if (parent.GetComponentInChildren<ProductIcon>(true) != null)
                 continue;
-            foreach (Element product in ResolveProducts(RecipeField.GetValue(entry) as Recipe))
+            List<Element> products = ResolveProducts(RecipeField.GetValue(entry) as Recipe);
+            for (int i = 0; i < products.Count; i++)
             {
-                Icons.Add(parent, product);
+                Icons.Add(parent, products[i], i);
                 added++;
             }
         }
@@ -102,6 +104,27 @@ public class OrderPreviewPlugin : BaseUnityPlugin
             if (icon != null)
                 Destroy(icon.gameObject);
         }
+        foreach (WindowProducts strip in Resources.FindObjectsOfTypeAll<WindowProducts>())
+        {
+            if (strip != null)
+                Destroy(strip.gameObject);
+        }
+    }
+
+    /// <summary>
+    /// DisplayButtonState runs whenever the window's situation changes state or its slots change,
+    /// so it sees every new prediction and the start of the recipe.
+    /// </summary>
+    [HarmonyPatch(typeof(AureateWindow), "DisplayButtonState")]
+    private static class WindowPatch
+    {
+        internal static void Postfix(AureateWindow __instance, Situation situation)
+        {
+            Recipe recipe = situation?.GetCurrentRecipe();
+            bool show = recipe != null && recipe.Craftable && !recipe.HintOnly
+                && (situation.TimeRemaining > 0f || situation.StateIdentifier == SecretHistories.Enums.StateEnum.Unstarted);
+            WindowProducts.Show(__instance, show ? recipe : null);
+        }
     }
 
     [HarmonyPatch(typeof(AmbittableDisplayOpen), nameof(AmbittableDisplayOpen.Populate))]
@@ -115,10 +138,8 @@ public class OrderPreviewPlugin : BaseUnityPlugin
                 Destroy(old.gameObject);
 
             List<Element> products = ResolveProducts(recipe);
-            foreach (Element product in products)
-                Icons.Add(parent, product);
-            // TEMP diagnostics
-            Debug.Log($"[OrderPreview] Populate {recipe?.Id} effects={(recipe?.Effects == null ? "null" : string.Join(",", recipe.Effects))} products={string.Join(",", products.Select(p => p.Id))} parent={parent.name}");
+            for (int i = 0; i < products.Count; i++)
+                Icons.Add(parent, products[i], i);
         }
     }
 
@@ -133,22 +154,57 @@ public class OrderPreviewPlugin : BaseUnityPlugin
 
     }
 
-    private static Transform IconParent(AmbittableDisplayOpen entry) =>
-        (RequirementsField.GetValue(entry) as AureateAspectsDisplay)?.transform ?? entry.transform;
-
-    private static class Icons
+    /// <summary>
+    /// The row's background (ButtonBg, parent of the requirements display). Icons are placed there
+    /// outside the layout: inside the requirements grid they wrapped onto a new line when a recipe
+    /// had three requirements and spilled over the next header.
+    /// </summary>
+    private static Transform IconParent(AmbittableDisplayOpen entry)
     {
-        internal static void Add(Transform parent, Element product)
+        Transform requirements = (RequirementsField.GetValue(entry) as AureateAspectsDisplay)?.transform;
+        return requirements != null && requirements.parent != null ? requirements.parent : entry.transform;
+    }
+
+    internal static class Icons
+    {
+        private const float Size = 30f;
+        private const float Margin = 16f;
+        /// <summary>Slightly below the row's middle: at the bottom corner the badge touched the border.</summary>
+        private const float Drop = -9f;
+
+        /// <summary>
+        /// At the row's right end, vertically centred (a little low), on a dark badge so it doesn't
+        /// read as one more requirement. Several results line up right to left.
+        /// </summary>
+        internal static void Add(Transform parent, Element product, int index, float size = Size, float margin = Margin, float drop = Drop)
         {
             var go = new GameObject("OrderProduct", typeof(RectTransform));
-            go.transform.SetParent(parent, false);
-            go.transform.SetAsLastSibling();
-            var image = go.AddComponent<Image>();
+            var rect = (RectTransform)go.transform;
+            rect.SetParent(parent, false);
+            rect.SetAsLastSibling();
+            rect.anchorMin = rect.anchorMax = new Vector2(1f, 0.5f);
+            rect.pivot = new Vector2(1f, 0.5f);
+            rect.sizeDelta = new Vector2(size + 6f, size + 6f);
+            rect.anchoredPosition = new Vector2(-margin - index * (size + 10f), drop);
+            go.AddComponent<LayoutElement>().ignoreLayout = true;
+
+            var badge = go.AddComponent<Image>();
+            badge.sprite = GameStyle.Sprite("box-rnd-16px");
+            badge.type = Image.Type.Sliced;
+            badge.color = new Color(0f, 0f, 0f, 0.55f);
+
+            var iconGo = new GameObject("Icon", typeof(RectTransform));
+            var iconRect = (RectTransform)iconGo.transform;
+            iconRect.SetParent(rect, false);
+            iconRect.anchorMin = Vector2.zero;
+            iconRect.anchorMax = Vector2.one;
+            iconRect.offsetMin = new Vector2(3f, 3f);
+            iconRect.offsetMax = new Vector2(-3f, -3f);
+            var image = iconGo.AddComponent<Image>();
             image.sprite = ResourcesManager.GetAppropriateSpriteForElement(product);
             image.preserveAspect = true;
-            var layout = go.AddComponent<LayoutElement>();
-            layout.minWidth = layout.preferredWidth = 34f;
-            layout.minHeight = layout.preferredHeight = 34f;
+            image.raycastTarget = false;
+
             go.AddComponent<ProductIcon>().Init(product, image.sprite);
         }
     }
@@ -245,5 +301,56 @@ public class ProductIcon : MonoBehaviour, IDetailable, IPointerClickHandler
     {
         // Handled here, so the click doesn't also select the recipe behind the icon.
         Watchman.Get<AureateNotifier>().ShowDetailable(this);
+    }
+}
+
+/// <summary>
+/// The result icons in a situation window: a holder at the left of the footer's button bar
+/// (first tried in Content's bottom right, where it could cover the notes or slots), rebuilt only
+/// when the recipe changes.
+/// </summary>
+public class WindowProducts : MonoBehaviour
+{
+    private const float IconSize = 32f;
+    private const float LeftMargin = 24f;
+    private string _recipeId;
+
+    internal static void Show(AureateWindow window, Recipe recipe)
+    {
+        Transform host = window.transform.Find("Footer/ButtonsBar") ?? window.transform.Find("Footer");
+        if (host == null)
+            return;
+        WindowProducts strip = host.GetComponentInChildren<WindowProducts>(true);
+        if (recipe == null)
+        {
+            if (strip != null)
+                strip.gameObject.SetActive(false);
+            return;
+        }
+        if (strip == null)
+        {
+            var go = new GameObject("RecipeProducts", typeof(RectTransform));
+            var rect = (RectTransform)go.transform;
+            rect.SetParent(host, false);
+            rect.SetAsLastSibling();
+            rect.anchorMin = rect.anchorMax = new Vector2(0f, 0.5f);
+            rect.pivot = new Vector2(0f, 0.5f);
+            rect.anchoredPosition = new Vector2(LeftMargin, 0f);
+            go.AddComponent<LayoutElement>().ignoreLayout = true;
+            strip = go.AddComponent<WindowProducts>();
+        }
+        strip.gameObject.SetActive(true);
+        if (strip._recipeId == recipe.Id)
+            return;
+        strip._recipeId = recipe.Id;
+        foreach (Transform child in strip.transform)
+            Destroy(child.gameObject);
+        List<Element> products = OrderPreviewPlugin.ResolveProducts(recipe);
+        // Icons.Add lines icons up right to left from the holder's right edge; size the holder
+        // to fit them so they start at its left.
+        ((RectTransform)strip.transform).sizeDelta = new Vector2(
+            Mathf.Max(0, products.Count * (IconSize + 10f) - 4f), IconSize + 6f);
+        for (int i = 0; i < products.Count; i++)
+            OrderPreviewPlugin.Icons.Add(strip.transform, products[i], i, IconSize, 0f, 0f);
     }
 }

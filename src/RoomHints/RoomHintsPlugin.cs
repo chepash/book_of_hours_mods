@@ -136,15 +136,17 @@ public class RoomHintsPlugin : BaseUnityPlugin
         if (rows == 0)
             return null;
 
-        // A column to the right of the unlock icon in the middle of the room, sized so that
-        // all rows fit the room's height. Units are the room's own (world canvas) units.
+        // A column centred on the room, over its unlock icon, sized so that all rows fit the
+        // room's height. It used to sit to the right of the icon, but a narrow room with many
+        // requirements (Blockaded Stairs: 9) then spilled over its neighbours. Clicks pass
+        // through to the icon. Units are the room's own (world canvas) units.
         float height = roomRect.rect.height;
         float unit = Mathf.Clamp(Mathf.Min(height * 0.16f, height * 0.75f / (rows * 1.2f)), 10f, 60f);
 
         RectTransform hint = GameStyle.Rect("RoomHints", roomRect);
         hint.anchorMin = hint.anchorMax = new Vector2(0.5f, 0.5f);
-        hint.pivot = new Vector2(0f, 0.5f);
-        hint.anchoredPosition = new Vector2(height * 0.3f, 0f);
+        hint.pivot = new Vector2(0.5f, 0.5f);
+        hint.anchoredPosition = Vector2.zero;
         hint.SetAsLastSibling(); // above the shroud
         var group = hint.gameObject.AddComponent<CanvasGroup>();
         group.blocksRaycasts = false; // clicks still open the room window

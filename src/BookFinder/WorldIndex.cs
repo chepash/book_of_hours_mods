@@ -28,6 +28,15 @@ public class ItemEntry
     public string Location;
     /// <summary>Lies in a hidden panel the player has to click open (e.g. Watchman's Tower desk).</summary>
     public bool InSecretCompartment;
+    /// <summary>
+    /// The desk or other workstation the item is inside of (a slot, a running action's storage,
+    /// uncollected results). The item itself sits in the desk's hidden window then, so the camera
+    /// should go to the desk.
+    /// </summary>
+    public Token HostToken;
+    public string HostLabel;
+    /// <summary>The sphere the token was in at scan time; a change means it was moved.</summary>
+    public Sphere Sphere;
     /// <summary>Aspects of one card (not multiplied by the stack size), without the element's own id.</summary>
     public AspectsDictionary Aspects;
     /// <summary>Set for readable items (books, films, records, ...).</summary>
@@ -55,13 +64,20 @@ public class BookInfo
     /// already showed it (the mastering recipe carries reading.&lt;principle&gt; too).
     /// </summary>
     public string Memory;
+    /// <summary>
+    /// Subject aspect (r.raggedcrossroads): the skill the text is about. Constellation visitors ask
+    /// for "a text on &lt;subject&gt; [N]".
+    /// </summary>
+    public string Subject;
+    /// <summary>Sophistication (hidden soph aspect): the [N] those requests compare with.</summary>
+    public int Soph;
 }
 
 public class BookFilter
 {
     public readonly HashSet<string> Mysteries = new HashSet<string>();
     public readonly HashSet<int> Levels = new HashSet<int>();
-    public ReadState ReadState = ReadState.Any;
+    public ReadState ReadState = ReadState.Unread; // The player mostly looks for books still to read.
     /// <summary>Language ids; <see cref="WorldIndex.NoLanguage"/> stands for "no foreign language".</summary>
     public readonly HashSet<string> Languages = new HashSet<string>();
     /// <summary>Readable kinds (<see cref="BookInfo.Kind"/>); any of these.</summary>
@@ -73,6 +89,35 @@ public class BookFilter
     public readonly HashSet<string> Contaminations = new HashSet<string>();
     public const string AnyContamination = "*";
     public const string NoContamination = "-";
+    /// <summary>
+    /// A visitor in the house: only books they can be given ("Give or Take" in Talk). Replaces the
+    /// read-state filter: whether the player has mastered the book doesn't matter to the guest.
+    /// </summary>
+    public PersonEntry Guest;
+    /// <summary>
+    /// What the open constellation window asks for (see <see cref="NxRequests"/>). Like a guest, it
+    /// replaces the read-state filter.
+    /// </summary>
+    public NxRequest Request;
+
+    /// <summary>
+    /// talk.visitor.consultation.*: the book's mystery.&lt;p&gt; at least the guest's interest.&lt;p&gt;;
+    /// talk.visitor.intercept.tx.*: not consulted by this guest before (the book then carries
+    /// tx.&lt;guest&gt;); talk.visitor.cantread.*: a foreign text w.&lt;lang&gt; needs u.&lt;lang&gt;.
+    /// Contaminated books are left out: the player keeps them away from other books.
+    /// </summary>
+    public static bool GuestCanUse(ItemEntry item, PersonEntry guest)
+    {
+        BookInfo book = item.Book;
+        if (book?.Mystery == null || book.Contaminations.Count > 0)
+            return false;
+        int interest = guest.Aspects.AspectValue("interest." + book.Mystery);
+        if (interest <= 0 || book.Level < interest)
+            return false;
+        if (item.Aspects.AspectValue("tx." + guest.PersonId) > 0)
+            return false;
+        return book.Language == null || guest.Aspects.AspectValue("u." + book.Language.Substring("w.".Length)) > 0;
+    }
 
     public bool Matches(ItemEntry item, string query)
     {
@@ -83,9 +128,19 @@ public class BookFilter
             return false;
         if (Levels.Count > 0 && !Levels.Contains(book.Level))
             return false;
-        if (ReadState == ReadState.Unread && book.Mastered)
+        if (Request != null)
+        {
+            if (!Request.Fits(item))
+                return false;
+        }
+        else if (Guest != null)
+        {
+            if (!GuestCanUse(item, Guest))
+                return false;
+        }
+        else if (ReadState == ReadState.Unread && book.Mastered)
             return false;
-        if (ReadState == ReadState.Mastered && !book.Mastered)
+        else if (ReadState == ReadState.Mastered && !book.Mastered)
             return false;
         if (Languages.Count > 0 && !Languages.Contains(book.Language ?? WorldIndex.NoLanguage))
             return false;
@@ -171,6 +226,7 @@ public static class WorldIndex
                 string skip = !IsReachable(sphere.SphereCategory) ? "unreachable sphere"
                     : path.Contains("offstage") ? "offstage"
                     : IsInThePost(sphere, path) ? "in the post"
+                    : IsPendingArrival(sphere, path) ? "pending offer"
                     : sphere.Shrouded ? "sphere shrouded"
                     : stack.IsShrouded ? "item shrouded"
                     : room != null && room.IsShrouded ? "room shrouded"
@@ -190,10 +246,18 @@ public static class WorldIndex
                     Title = title,
                     Location = location,
                     InSecretCompartment = secret,
+                    Sphere = sphere,
                     // Per card, not multiplied by stack size: two Shapt cards still give their
                     // aspects once per use, so 2 Forge, not 4.
                     Aspects = new AspectsDictionary(stack.GetAspectsDividedByQuantity(false)),
                 };
+                if (sphere.GetContainer() is Situation host && host.Token != null)
+                {
+                    item.HostToken = host.Token;
+                    item.HostLabel = host.Verb?.Label;
+                    if (!string.IsNullOrEmpty(item.HostLabel))
+                        item.Location = (item.Location.Length > 0 ? item.Location + " · " : "") + "in " + item.HostLabel;
+                }
                 item.Book = ReadBook(item.Aspects, stack.Element);
                 items.Add(item);
             }
@@ -246,6 +310,18 @@ public static class WorldIndex
     }
 
     /// <summary>
+    /// Offers and other arrivals (~/arrivalverbs!oriflammes.offer_..., post deliveries) keep what
+    /// they bring in their SituationStorage until the deal or the delivery completes: an auction
+    /// lot stays there even after the bid is paid. Not the player's yet. What they put in its
+    /// slots (the coin bid) and uncollected results (Output) are still listed.
+    /// </summary>
+    private static bool IsPendingArrival(Sphere sphere, string path)
+    {
+        return sphere.SphereCategory == SphereCategory.SituationStorage
+            && path.StartsWith("~/arrivalverbs", StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// Places the player can take things from: tables, shelves and hand (World), workstation
     /// slots (Threshold), a running workstation (SituationStorage) and its uncollected results
     /// (Output). Dormant spheres hold undrawn decks, e.g. d.books.nocturnal_draw with books the
@@ -261,7 +337,8 @@ public static class WorldIndex
 
     private static BookInfo ReadBook(AspectsDictionary aspects, Element element)
     {
-        if (aspects.AspectValue("readable") <= 0)
+        // Shop order forms are readable too, but they are not books: they go to Items.
+        if (aspects.AspectValue("readable") <= 0 || aspects.AspectValue("form.order") > 0)
             return null;
         var book = new BookInfo();
         foreach (KeyValuePair<string, int> aspect in aspects)
@@ -284,6 +361,14 @@ public static class WorldIndex
             else if (aspect.Key.StartsWith("contamination.", StringComparison.Ordinal))
             {
                 book.Contaminations.Add(aspect.Key);
+            }
+            else if (aspect.Key.StartsWith("r.", StringComparison.Ordinal))
+            {
+                book.Subject = aspect.Key;
+            }
+            else if (aspect.Key == "soph")
+            {
+                book.Soph = aspect.Value;
             }
         }
         book.Kind = ReadableKind(aspects);
@@ -345,7 +430,16 @@ public static class WorldIndex
 
     public static bool TitleMatches(ItemEntry item, string query)
     {
-        return string.IsNullOrEmpty(query) || item.Title.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0;
+        return string.IsNullOrEmpty(query) || item.Title.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0
+            || (item.Book?.Subject != null && SubjectName(item.Book.Subject).IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0);
+    }
+
+    /// <summary>"Ragged Crossroads" for r.raggedcrossroads, whose label is "Subject: Ragged Crossroads".</summary>
+    public static string SubjectName(string subjectId)
+    {
+        const string prefix = "Subject: ";
+        string label = LabelOf(subjectId);
+        return label.StartsWith(prefix, StringComparison.Ordinal) ? label.Substring(prefix.Length) : label;
     }
 
     public static bool IsPrinciple(string aspectId) => PrincipleSet.Contains(aspectId);

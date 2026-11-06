@@ -17,6 +17,8 @@ namespace SmoothZoom;
 /// action and multiplied by ZoomStepDistance (80), i.e. 400 units over a -120..-2400 range.
 /// Close up that quadruples the view in one notch. Here each notch scales the height by a
 /// constant percentage instead, so every step feels the same at any distance.
+/// Also swaps the zoom keys at the player's wish: E zooms in, Q out. The game's input actions
+/// "kbzoomin"/"kbzoomout" (UIController) get keyboard binding overrides, removed on unload.
 /// </summary>
 [BepInPlugin(Guid, Name, Version)]
 public class SmoothZoomPlugin : BaseUnityPlugin
@@ -34,6 +36,9 @@ public class SmoothZoomPlugin : BaseUnityPlugin
 
     internal static ConfigEntry<float> StepPercent;
     private Harmony _harmony;
+    private readonly List<(InputAction action, int index)> _overrides = new List<(InputAction, int)>();
+    private float _nextKeyTry;
+    private bool _keysDone;
 
     private void Awake()
     {
@@ -48,6 +53,39 @@ public class SmoothZoomPlugin : BaseUnityPlugin
     private void OnDestroy()
     {
         _harmony?.UnpatchSelf();
+        foreach ((InputAction action, int index) in _overrides)
+            action?.RemoveBindingOverride(index);
+    }
+
+    /// <summary>Until the game's PlayerInput exists (main menu has none), try once a second.</summary>
+    private void Update()
+    {
+        if (_keysDone || Time.unscaledTime < _nextKeyTry)
+            return;
+        _nextKeyTry = Time.unscaledTime + 1f;
+        PlayerInput input = FindObjectOfType<PlayerInput>();
+        if (input?.actions == null)
+            return;
+        _keysDone = true;
+        Rebind(input.actions.FindAction("kbzoomin"), "<Keyboard>/e");
+        Rebind(input.actions.FindAction("kbzoomout"), "<Keyboard>/q");
+        Logger.LogInfo(_overrides.Count > 0 ? "Zoom keys: E in, Q out" : "Zoom keys: no Q/E bindings found");
+    }
+
+    /// <summary>Points the action's Q or E keyboard binding at <paramref name="path"/>.</summary>
+    private void Rebind(InputAction action, string path)
+    {
+        if (action == null)
+            return;
+        for (int i = 0; i < action.bindings.Count; i++)
+        {
+            string p = action.bindings[i].path ?? "";
+            if (p == "<Keyboard>/q" || p == "<Keyboard>/e")
+            {
+                action.ApplyBindingOverride(i, path);
+                _overrides.Add((action, i));
+            }
+        }
     }
 
     [HarmonyPatch(typeof(CamOperator), nameof(CamOperator.OnZoomEvent))]

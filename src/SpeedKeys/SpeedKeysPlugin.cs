@@ -3,6 +3,7 @@ using HarmonyLib;
 using SecretHistories.Constants;
 using SecretHistories.Enums;
 using SecretHistories.Infrastructure;
+using UnityEngine;
 using UnityEngine.InputSystem;
 
 namespace SpeedKeys;
@@ -21,16 +22,32 @@ public class SpeedKeysPlugin : BaseUnityPlugin
     public const string Version = "0.1.0";
 
     private Harmony _harmony;
+    internal static BepInEx.Logging.ManualLogSource Log;
+    private float _nextAttach;
 
     private void Awake()
     {
+        Log = Logger;
         _harmony = new Harmony(Guid);
         _harmony.PatchAll(typeof(ZoomKeysToSpeed));
+        _harmony.PatchAll(typeof(SpeedLock.SetSpeedFx));
+        _harmony.PatchAll(typeof(SpeedLock.KeepSpeed));
+        _harmony.PatchAll(typeof(SpeedLock.KeepSpeedShown));
         Logger.LogInfo($"{Name} {Version} loaded");
+    }
+
+    private void Update()
+    {
+        // The speed buttons appear with the game scene: look for them once a second until found.
+        if (Time.unscaledTime < _nextAttach)
+            return;
+        _nextAttach = Time.unscaledTime + 1f;
+        SpeedLock.Attach();
     }
 
     private void OnDestroy()
     {
+        SpeedLock.Detach();
         _harmony?.UnpatchSelf();
     }
 

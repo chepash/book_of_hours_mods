@@ -30,6 +30,13 @@ public class PersonEntry
     public bool Here;
     public string Location;
     public AspectsDictionary Aspects;
+    /// <summary>A Sweet Bones helper not hired now: known from the deck (SweetBonesDeck).</summary>
+    public bool FromDeck;
+    /// <summary>
+    /// A Numa visitor (aspect "numatic", e.g. Aunt Mopsy, Julian Coseley): comes on their own in
+    /// Numa for a Numa matter; has no address and can't be invited by letter.
+    /// </summary>
+    public bool Numa;
 
     /// <summary>
     /// What the person brings to the table: a visitor's interests (interest.&lt;principle&gt;),
@@ -55,7 +62,8 @@ public class PeopleFilter
     public readonly HashSet<string> Principles = new HashSet<string>();
     /// <summary>Null: everyone.</summary>
     public PersonKind? Kind;
-    public bool HereOnly;
+    /// <summary>Only visitors who come in Numa alone (no address, no invitation).</summary>
+    public bool NumaOnly;
 
     public bool Matches(PersonEntry person, string query)
     {
@@ -63,7 +71,7 @@ public class PeopleFilter
             return false;
         if (Kind.HasValue && person.Kind != Kind.Value)
             return false;
-        if (HereOnly && !person.Here)
+        if (NumaOnly && !person.Numa)
             return false;
         return Principles.All(p => person.PrincipleValue(p) > 0);
     }
@@ -140,6 +148,9 @@ public static class PeopleIndex
                     Here = here,
                     Location = here ? (room != null ? room.Label : fallbackLabel ?? "") : "",
                     Aspects = new AspectsDictionary(aspects),
+                    // A departing card (embarking_*) has its own element: check the person's own one.
+                    Numa = kind == PersonKind.Visitor
+                        && (WorldIndex.ElementOf(personId)?.Aspects?.AspectValue("numatic") ?? 0) > 0,
                 };
                 // One row per person; prefer the card that is on stage.
                 if (!byPerson.TryGetValue(personId, out PersonEntry existing) || (here && !existing.Here))
@@ -166,6 +177,29 @@ public static class PeopleIndex
                     PersonId = id,
                     Location = "",
                     Aspects = new AspectsDictionary(element.Aspects),
+                };
+            }
+        }
+
+        // Sweet Bones helpers: one row per kind of deck card, as the assistant it becomes when hired
+        // (the employable card itself carries only the fee). Skipped when that assistant is listed already.
+        DeckSpec deck = SweetBonesDeck.Spec();
+        if (deck != null)
+        {
+            foreach (string id in deck.Spec.Distinct())
+            {
+                Element hired = SweetBonesDeck.HiredAs(WorldIndex.ElementOf(id));
+                if (hired == null || byPerson.ContainsKey(hired.Id))
+                    continue;
+                byPerson[hired.Id] = new PersonEntry
+                {
+                    Kind = PersonKind.Assistant,
+                    Element = hired,
+                    Name = string.IsNullOrEmpty(hired.Label) ? hired.Id : hired.Label,
+                    PersonId = hired.Id,
+                    Location = "",
+                    Aspects = new AspectsDictionary(hired.Aspects),
+                    FromDeck = true,
                 };
             }
         }

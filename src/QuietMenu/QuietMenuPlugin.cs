@@ -2,8 +2,10 @@ using System.Collections.Generic;
 using System.Reflection;
 using BepInEx;
 using HarmonyLib;
+using SecretHistories.Assets.Scripts.Application.UI;
 using SecretHistories.Entities;
 using SecretHistories.Infrastructure;
+using SecretHistories.UI;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 using UnityEngine.UI;
@@ -57,8 +59,12 @@ public class QuietMenuPlugin : BaseUnityPlugin
         SceneManager.sceneLoaded -= OnSceneLoaded;
         foreach (GameObject go in _hidden)
         {
-            if (go != null)
-                go.SetActive(true);
+            if (go == null)
+                continue;
+            go.SetActive(true);
+            ProemSlot proem = go.GetComponent<ProemSlot>();
+            if (proem != null && Watchman.Exists<ProemsRemoteConfig>())
+                Watchman.Get<ProemsRemoteConfig>().SubscribeProemSlot(proem);
         }
         _hidden.Clear();
     }
@@ -123,6 +129,12 @@ public class QuietMenuPlugin : BaseUnityPlugin
     {
         if (go == null || !go.activeSelf)
             return;
+        // The news slot is refilled from ProemsRemoteConfig, and Populate starts a fade-in
+        // coroutine on it: on a disabled object Unity logs "Coroutine couldn't be started".
+        // Unsubscribed, it's left alone.
+        ProemSlot proem = go.GetComponent<ProemSlot>();
+        if (proem != null && Watchman.Exists<ProemsRemoteConfig>())
+            Watchman.Get<ProemsRemoteConfig>().UnsubscribeProemSlot(proem);
         go.SetActive(false);
         _hidden.Add(go);
         Logger.LogInfo($"Hid '{go.name}' ({reason})");
